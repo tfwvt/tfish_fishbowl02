@@ -1,4 +1,4 @@
-# tf_web
+# tfish_fishbowl02
 
 Source for [tfish.net](https://tfish.net): a single `index.html` with an animated fish bowl.
 
