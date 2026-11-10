@@ -452,6 +452,74 @@
             100% { transform: translate(0, 0) scaleX(-1); }
         }
 
+        /* School of minnows. JS swims .school about the bowl (its origin is the school's centre) and turns
+           it round at the glass and at bubbles. Each minnow flips after its own --lag, front first, so a
+           turn ripples back through the school, and bobs on its own loop. Drawn facing left, like the fish. */
+        .school {
+            position: absolute;
+            left: 0;
+            top: 0;
+            z-index: 5; /* with the fish; added before them, so it swims behind them */
+            pointer-events: none;
+            will-change: transform;
+        }
+
+        .minnow {
+            position: absolute;
+            left: var(--x);
+            top: var(--y);
+            width: 16px;
+            height: 8px;
+            margin: -4px 0 0 -8px;
+            transform: scaleX(1);
+            /* --squeeze draws each minnow toward the middle: the school bunches up while it's dodging a bubble */
+            translate: calc(var(--x) * var(--squeeze, 0)) calc(var(--y) * var(--squeeze, 0));
+            transition: transform 0.3s ease var(--lag, 0s), translate 0.4s ease;
+        }
+
+        .school.facing-right .minnow { transform: scaleX(-1); }
+        .school.wary { --squeeze: -0.3; }
+
+        .minnow-body {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            animation: minnow-bob var(--bob, 1.4s) ease-in-out var(--phase, 0s) infinite alternate;
+        }
+
+        .minnow-body::before { /* body, with its eye */
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 12px;
+            height: 8px;
+            background:
+                radial-gradient(circle at 3px 3px, #0f172a 0 1.1px, transparent 1.4px),
+                linear-gradient(#f1f5f9, #94a3b8);
+            clip-path: polygon(0 50%, 30% 0, 100% 25%, 100% 75%, 30% 100%);
+        }
+
+        .minnow-body::after { /* tail */
+            content: '';
+            position: absolute;
+            left: 11px;
+            top: 1px;
+            width: 5px;
+            height: 6px;
+            background: #94a3b8;
+            clip-path: polygon(0 50%, 100% 0, 100% 100%);
+        }
+
+        @keyframes minnow-bob {
+            from { translate: 0 -1.5px; }
+            to { translate: 0 1.5px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .minnow-body { animation: none; }
+        }
+
         /* Data Overlay */
         .stats-overlay {
             position: absolute;
@@ -812,7 +880,10 @@
                 const ahead = (cx - fishX) * state.dir;
                 return ahead > -(radius + reachX) && ahead < speed * planHorizon + radius + reachX;
             });
-            if (!near.length) return [];
+            if (!near.length) {
+                state.bumpAt = Infinity;
+                return [];
+            }
 
             const relaxV = (y) => Math.max(-relaxSpeed, Math.min(relaxSpeed, (baseY - y) * 2));
             // A dart in progress carries on moving the fish, on top of the swerve
@@ -853,6 +924,7 @@
                 if (threads) best = play(threads);
                 else state.searchAfter = now + 400;
             }
+            state.bumpAt = best.bumpAt;
             return best.stages;
         }
 
@@ -923,6 +995,218 @@
                 fish.style.translate = `${localX}px ${state.applied.y / scale}px`;
                 fish.style.rotate = `${(scaleX < 0 ? -1 : 1) * (dart.rot + state.tilt)}deg`;
             });
+        }
+
+        // School of minnows: swims across the bowl and off the edge like the fish, then turns round out of sight
+        // and comes back in at a new height. It slips over or under project bubbles where there's a gap (planned
+        // like a fish's swerve); when it gets close to one ahead that it can't get past, it turns round and darts
+        // off instead of bumping it. It never pops bubbles, and the little aerator bubbles don't bother it.
+        const minnowSpots = [[-24, -3], [-15, -11], [-13, 7], [-3, -2], [-2, 12], [7, -10], [9, 5], [18, -3], [19, 10], [26, 2]];
+        const schoolEl = document.createElement('div');
+        schoolEl.className = 'school';
+        schoolEl.setAttribute('aria-hidden', 'true');
+        const minnows = minnowSpots.map(([x, y]) => {
+            const minnow = document.createElement('div');
+            minnow.className = 'minnow';
+            minnow.style.setProperty('--x', `${x}px`);
+            minnow.style.setProperty('--y', `${y}px`);
+            const body = document.createElement('div');
+            body.className = 'minnow-body';
+            body.style.setProperty('--bob', `${1.1 + Math.random() * 0.8}s`);
+            body.style.setProperty('--phase', `${-Math.random() * 2}s`);
+            minnow.appendChild(body);
+            schoolEl.appendChild(minnow);
+            return { el: minnow, x };
+        });
+        document.querySelector('.fish-swim').before(schoolEl);
+
+        const schoolSpeed = 48;      // px/s cruising
+        const schoolWary = 26;       // px/s while a bubble it can't yet get past is coming up: it holds back and dodges
+        const schoolHover = 8;       // px/s when it's just turned and is boxed in again: it hangs back while it dodges
+        const schoolBurst = 80;      // px/s for 0.7s after turning away from a bubble
+        const schoolTurnAccel = 600; // px/s²: it stops and speeds off the other way in a fraction of a second
+        const schoolTurnGap = 2;     // px: the closest a turn may bring it to a bubble; it turns as late as allows that
+        const schoolTurnPause = 800; // ms before a bubble can turn it again, so it doesn't dither between two
+        const schoolRepeatPause = 2500; // ms after a quick back-and-forth before it turns again, unless about to touch
+        // Ways to turn away from a bubble: straight back, or bouncing back at 30° up or down
+        const schoolBounces = [0, -30, 30].map((deg) => ({
+            vx: schoolBurst * Math.cos(deg * Math.PI / 180), vy: schoolBurst * Math.sin(deg * Math.PI / 180),
+        }));
+        const school = {
+            x: reduceMotion ? 160 : -60, y: 300, // centre, in px from the bowl's top left; starts just off the left edge
+            dir: 1, vx: schoolSpeed, trackY: 300,
+            halfWidth: 34, halfHeight: 16, // reach of the outermost minnows (less while it's bunched up)
+            turnedAt: -Infinity, prevTurnedAt: -Infinity, burstUntil: -Infinity, waitUntil: 0, waryUntil: 0, bunch: 0, bounce: schoolBounces[0],
+            // Its swerves are planned like a fish's (see planSwerve), so it has the same fields
+            speed: schoolSpeed, avoidY: 0, vy: 0, dart: null, plan: [], planStart: 0, planAge: Infinity, bumpAt: Infinity,
+            searchAfter: Infinity, // simple dodges only, no threading between bubbles: the school gives up and turns sooner
+        };
+
+        function turnSchool(now) {
+            // The front minnows turn first and the turn ripples back over a quarter of a second
+            const fronts = minnows.map((m) => m.x * school.dir);
+            const lead = Math.max(...fronts), spread = lead - Math.min(...fronts);
+            minnows.forEach((m, i) => m.el.style.setProperty('--lag', `${((lead - fronts[i]) / spread) * 0.25}s`));
+            school.dir = -school.dir;
+            school.prevTurnedAt = school.turnedAt;
+            school.turnedAt = now;
+            school.planAge = Infinity; // plan afresh for the new direction
+            schoolEl.classList.toggle('facing-right', school.dir > 0);
+        }
+
+        function placeSchool() {
+            schoolEl.style.transform = `translate(${school.x}px, ${school.y}px)`;
+        }
+        schoolEl.classList.toggle('facing-right', school.dir > 0);
+        placeSchool();
+
+        function swimSchool(dt, now, bubbles, bowlRect) {
+            const size = bowlRect.width;
+            const originX = bowlRect.left + bowl.clientLeft;
+            const originY = bowlRect.top + bowl.clientTop;
+            const [waterMin, waterMax] = waterLimits(bowlRect);
+
+            // Out past the edge of the bowl: wait a moment out of sight, then come back in at a new height, either
+            // turning round or (like the red fish) from the other side
+            const out = school.dir > 0 ? school.x - school.halfWidth > size + 20 : school.x + school.halfWidth < -20;
+            if (out) {
+                school.waitUntil ||= now + 1000 + Math.random() * 3000;
+                if (now < school.waitUntil) return;
+                school.waitUntil = 0;
+                school.trackY = school.y = size * (0.28 + Math.random() * 0.44);
+                school.avoidY = school.vy = 0;
+                school.plan = [];
+                if (Math.random() < 0.5) turnSchool(now);
+                else school.x = school.dir > 0 ? -school.halfWidth - 15 : size + school.halfWidth + 15;
+                school.vx = school.dir * schoolSpeed;
+            }
+
+            // The bubbles where they're drawn, in px from the bowl's top left
+            const drawn = bubbles.map(({ drawn: d, rise }) => ({ x: d.cx - originX, y: d.cy - originY, r: d.radius, rise }));
+            // How far the school's box is from a drawn bubble (negative: overlapping), and which way is out
+            const clearance = (x, y, b) => {
+                const nx = Math.max(x - school.halfWidth, Math.min(b.x, x + school.halfWidth));
+                const ny = Math.max(y - school.halfHeight, Math.min(b.y, y + school.halfHeight));
+                return Math.hypot(b.x - nx, b.y - ny) - b.r;
+            };
+
+            // Evasive first: while no swerve gets it past a bubble coming up (see planSwerve), it holds back and keeps
+            // dodging over or under. If it's still about to touch one, it turns round at the last moment a turn
+            // still gets it clear (straight back, or bouncing back at 30° up or down), so it all but touches first.
+            const cornered = school.bumpAt < 1.5;
+            // It bunches up while dodging, and stays bunched a moment after, so it doesn't flicker in and out.
+            // Its box shrinks with the minnows as they draw in, and is full size again as soon as they start to
+            // spread, so it always covers them.
+            if (cornered) school.waryUntil = now + 600;
+            const wary = now < school.waryUntil;
+            schoolEl.classList.toggle('wary', wary);
+            school.bunch = wary ? Math.min(1, school.bunch + dt / 0.4) : 0;
+            school.halfWidth = 34 - 8 * school.bunch;
+            school.halfHeight = 16 - 3 * school.bunch;
+
+            // Closest it comes to any bubble over the next `secs` if it turns after `delay` s with `bounce` (no bounce:
+            // it carries on). It keeps its speed until then, then brakes and darts off; the bubbles keep rising.
+            const closestIfTurning = (delay, bounce, secs = 1) => {
+                let closest = Infinity;
+                const v0 = school.vx, v1 = bounce ? -school.dir * bounce.vx : v0;
+                const brake = Math.sign(v1 - v0) * schoolTurnAccel, reach = Math.abs(v1 - v0) / schoolTurnAccel;
+                for (let t = 0; t <= secs; t += 0.025) {
+                    const u = Math.max(0, t - delay), ur = Math.min(u, reach);
+                    const x = school.x + v0 * Math.min(t, delay) + v0 * ur + brake * ur * ur / 2 + v1 * (u - ur);
+                    const y = Math.max(waterMin - originY, Math.min(waterMax - originY,
+                        school.y + school.vy * Math.min(t, delay, 0.3) + (bounce ? bounce.vy * u : 0)));
+                    for (const b of drawn) closest = Math.min(closest, clearance(x, y, { ...b, y: b.y - b.rise * t }));
+                }
+                return closest;
+            };
+            // Turn when carrying on would touch a bubble and waiting another twentieth of a second would leave no
+            // clean way out, taking the way out that stays clearest for the next two seconds (so it heads for open
+            // water rather than straight at the next bubble). If none is quite clean (boxed in), it still takes the
+            // best one once a touch is moments away.
+            // Just turned twice in quick succession (boxed in between bubbles): hang back and dodge up or down for a
+            // while rather than turning straight back again, unless it's about to touch one
+            const pingPong = school.turnedAt - school.prevTurnedAt < 2000 && now - school.turnedAt < schoolRepeatPause;
+            const hovering = cornered && pingPong;
+            if (cornered && now - school.turnedAt > schoolTurnPause && closestIfTurning(Infinity, null) < schoolTurnGap) {
+                // Bouncing up needs room above: up at the top of the water, a bubble rising beneath would catch it
+                const roomAbove = school.y - (waterMin - originY) > 60;
+                const options = schoolBounces.filter((bounce) => bounce.vy >= 0 || roomAbove).map((bounce) => ({
+                    bounce, now: closestIfTurning(0, bounce), later: closestIfTurning(0.05, bounce), ahead: closestIfTurning(0, bounce, 2),
+                }));
+                const clean = options.filter((o) => o.now >= schoolTurnGap);
+                const best = (clean.length ? clean : options).reduce((a, b) => ((clean.length ? b.ahead > a.ahead : b.now > a.now) ? b : a));
+                const lastChance = options.every((o) => o.later < schoolTurnGap);
+                const touchingSoon = closestIfTurning(0.15, null) < schoolTurnGap && drawn.some((b) => {
+                    for (let t = 0; t <= 0.15; t += 0.025) if (clearance(school.x + school.vx * t, school.y, { ...b, y: b.y - b.rise * t }) < 1) return true;
+                    return false;
+                });
+                if ((lastChance && best.now >= schoolTurnGap && !hovering) || (best.now < schoolTurnGap && touchingSoon)) {
+                    turnSchool(now);
+                    school.burstUntil = now + 700;
+                    school.bounce = best.bounce;
+                }
+            }
+
+            // Ease into the new direction (or speed) rather than snapping
+            const bursting = now < school.burstUntil;
+            school.speed = bursting ? school.bounce.vx : hovering ? schoolHover : cornered ? schoolWary : schoolSpeed;
+            school.vx += Math.max(-schoolTurnAccel * dt, Math.min(schoolTurnAccel * dt, school.dir * school.speed - school.vx));
+            school.x += school.vx * dt;
+
+            // Its track wanders gently up and down; swerves over or under bubbles are measured from it. While it
+            // darts off after a turn it holds the bounce's climb or dive instead.
+            const baseY = school.trackY + 18 * Math.sin((now / 1000) * (2 * Math.PI / 7));
+            school.planAge += dt;
+            if (school.planAge >= planEvery && !bursting) {
+                school.planAge = 0;
+                const seen = bubbles.map((b) => ({ ...b, cx: b.drawn.cx, cy: b.drawn.cy, radius: b.drawn.radius }));
+                school.plan = planSwerve(school, now, originX + school.x, originY + school.y, originY + baseY,
+                    school.halfWidth, school.halfHeight, seen, waterMin, waterMax);
+                school.planStart = now;
+            }
+            const stage = remainingStages(school, now)[0];
+            const swerveVy = stage ? stage[0] : Math.max(-relaxSpeed, Math.min(relaxSpeed, -school.avoidY * 2));
+            const wantVy = easeAtEdge(bursting ? school.bounce.vy : swerveVy, originY + baseY + school.avoidY, waterMin, waterMax);
+            school.vy += Math.max(-steerAccel * dt, Math.min(steerAccel * dt, wantVy - school.vy));
+            school.avoidY += school.vy * dt;
+            school.y = baseY + school.avoidY;
+
+            // Backstop: the school can't pass through a bubble. If it still ends up overlapping one, ease it back out
+            // (at most 3px a frame, so it never jumps) and bounce it off: back the way it came if the bubble was ahead,
+            // away up or down if above or below. Pushed up against the top of the water by a bubble rising beneath,
+            // it darts off sideways instead of riding the bubble up.
+            for (let pass = 0; pass < 3; pass++) {
+                let worst = null;
+                for (const b of drawn) {
+                    const gap = clearance(school.x, school.y, b);
+                    if (gap >= 1 || (worst && gap >= worst.gap)) continue;
+                    const nx = Math.max(school.x - school.halfWidth, Math.min(b.x, school.x + school.halfWidth));
+                    const ny = Math.max(school.y - school.halfHeight, Math.min(b.y, school.y + school.halfHeight));
+                    const len = Math.hypot(nx - b.x, ny - b.y);
+                    // Way out: from the bubble's centre through the nearest point of the box (straight up or down if
+                    // the centre is inside the box)
+                    const out = len > 0.01 ? { x: (nx - b.x) / len, y: (ny - b.y) / len } : { x: 0, y: school.y < b.y ? -1 : 1 };
+                    const push = len > 0.01 ? 1 - gap : b.r + school.halfHeight + 1 - Math.abs(school.y - b.y);
+                    worst = { gap, out, push, b };
+                }
+                if (!worst) break;
+                const push = Math.min(worst.push, 3);
+                school.x += worst.out.x * push;
+                school.avoidY += worst.out.y * push;
+                school.y += worst.out.y * push;
+                const atTop = worst.out.y < -0.5 && school.y - (waterMin - originY) < 30;
+                const ahead = (worst.b.x - school.x) * school.dir > 0;
+                if (now - school.turnedAt > schoolTurnPause && (worst.out.x * school.dir < -0.3 || (atTop && ahead))) {
+                    turnSchool(now);
+                    school.burstUntil = now + 700;
+                    school.bounce = schoolBounces[atTop || worst.out.y > 0.2 ? 2 : worst.out.y < -0.2 ? 1 : 0];
+                } else if (atTop && now >= school.burstUntil) {
+                    school.burstUntil = now + 700; // already heading away from it: dart on along the top
+                    school.bounce = schoolBounces[0];
+                }
+                if (Math.abs(worst.out.y) > 0.2) school.vy = Math.sign(worst.out.y) * Math.max(Math.abs(school.vy), Math.abs(schoolBounces[1].vy));
+            }
+            placeSchool();
         }
 
         // Pops in place; the bubble stays hidden (and out of the tab order) until its next pass from the bottom
@@ -1091,7 +1375,10 @@
             const bubbles = [...document.querySelectorAll('.project-bubble:not(.popping, .waiting)')].map((el) => {
                 const r = el.getBoundingClientRect();
                 const stopped = el.matches(':hover, :focus-within'); // held still so someone can click it
-                return { el, cx: r.left + r.width / 2, cy: r.top + r.height / 2, radius: r.width / 2, stopped, rise: stopped ? 0 : riseSpeed };
+                // Where it's drawn: it sways side to side, and grows while hovered. The school steers clear of this.
+                const d = el.firstElementChild.getBoundingClientRect();
+                const drawn = { cx: d.left + d.width / 2, cy: d.top + d.height / 2, radius: d.width / 2 };
+                return { el, cx: r.left + r.width / 2, cy: r.top + r.height / 2, radius: r.width / 2, stopped, rise: stopped ? 0 : riseSpeed, drawn };
             });
             const popped = new Set();
             const pop = (b) => {
@@ -1123,6 +1410,7 @@
             });
 
             steerFish(dt, now, bubbles.filter((b) => !popped.has(b)), bowlRect);
+            swimSchool(dt, now, bubbles.filter((b) => !popped.has(b)), bowlRect);
             requestAnimationFrame(tick);
         }
 
