@@ -8,6 +8,7 @@ Project bubbles rise through the bowl. The bowl starts empty and the bubbles set
 
 - Fish steer around bubbles. They don't always make it, and a bubble pops if it hits a fish or the top of the glass.
 - A popped bubble comes back from the bottom on its next pass.
+- Hovering or focusing a bubble stops just that one, so it's easy to click. The others keep rising, and one that rises into it pops.
 - Fish near a pop dart away, then settle only halfway back, so a startle shifts their path up or down.
 - Visitors with reduced motion turned on see still bubbles and no fish reactions.
 

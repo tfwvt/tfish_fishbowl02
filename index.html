@@ -193,10 +193,10 @@
             transition: transform 0.25s ease, box-shadow 0.25s ease, color 0.25s ease, opacity 0.25s ease;
         }
 
-        /* Hold still while hovered/focused so it's easy to click.
-           All bubbles pause together so their spacing doesn't drift. */
-        .project-layer:hover .project-bubble,
-        .project-layer:focus-within .project-bubble,
+        /* Hold still while hovered/focused so it's easy to click. Only that bubble stops: the rest keep
+           rising, and one that rises into it pops. */
+        .project-bubble:hover,
+        .project-bubble:focus-within,
         .project-bubble:hover .project-bubble-inner,
         .project-bubble:focus-within .project-bubble-inner {
             animation-play-state: paused;
@@ -209,7 +209,7 @@
             box-shadow: inset 0 0 24px rgba(74, 222, 128, 0.4), 0 0 24px rgba(74, 222, 128, 0.45);
         }
 
-        /* An invisible popped or still-waiting bubble must not count as hovered (it would pause the tank) */
+        /* An invisible popped or still-waiting bubble must not count as hovered (it would stop) */
         .project-bubble.popping,
         .project-bubble.waiting {
             pointer-events: none;
@@ -726,15 +726,15 @@
 
         // When (in s) a fish swimming on at its speed first bumps a bubble, if it's at height ys[k] at time
         // (k + 1) * planStep; Infinity if it never does. The hit test, a few px wider, against each bubble
-        // risen that much further.
+        // risen that much further (at its `rise` speed: 0 while someone has it stopped).
         function firstBump(state, fishX, ys, reachX, clearance, near) {
             const speed = Math.max(state.speed, 20);
             for (let k = 0; k < ys.length; k++) {
                 const t = (k + 1) * planStep;
                 const x = fishX + state.dir * speed * t;
                 const y = ys[k];
-                for (const { cx, cy, radius } of near) {
-                    const by = cy - riseSpeed * t;
+                for (const { cx, cy, radius, rise } of near) {
+                    const by = cy - rise * t;
                     const dx = cx - Math.max(x - reachX, Math.min(cx, x + reachX));
                     const dy = by - Math.max(y - clearance, Math.min(by, y + clearance));
                     if (dx * dx + dy * dy < (radius + 6) ** 2) return t;
@@ -755,7 +755,8 @@
                 .filter((b) => b !== bubble)
                 .map((b) => {
                     const o = b.getBoundingClientRect();
-                    return { cx: o.left + o.width / 2, cy: o.top + o.height / 2, radius: o.width / 2 };
+                    const rise = b.matches(':hover, :focus-within') ? 0 : riseSpeed;
+                    return { cx: o.left + o.width / 2, cy: o.top + o.height / 2, radius: o.width / 2, rise };
                 });
 
             const bowlRect = bowl.getBoundingClientRect();
@@ -927,6 +928,7 @@
         // Pops in place; the bubble stays hidden (and out of the tab order) until its next pass from the bottom
         function popBubble(bubble) {
             bubble.classList.add('popping');
+            bubble.poppedAt = performance.now();
             bubble.querySelector('button').tabIndex = -1;
             startleFish(bubble);
         }
@@ -1043,6 +1045,12 @@
 
             bubble.appendChild(button);
             projectLayer.appendChild(bubble);
+
+            // When its rise began, to put it back in step after it's been stopped (see resyncBubble)
+            if (!reduceMotion) {
+                const rise = bubble.getAnimations().find((a) => a.animationName === 'project-rise');
+                rise?.ready.then(() => { bubble.riseStart = rise.startTime; });
+            }
         });
 
         // Bubbles pop when they bump into a fish or reach the top of the bowl
@@ -1053,6 +1061,18 @@
             const nearestX = Math.max(rect.left + insetX, Math.min(cx, rect.right - insetX));
             const nearestY = Math.max(rect.top + insetY, Math.min(cy, rect.bottom - insetY));
             return Math.hypot(cx - nearestX, cy - nearestY) < radius;
+        }
+
+        // A stopped bubble falls behind its place in the procession. Once it has popped and is out of sight,
+        // move it back into step, staying within its current pass so it still comes back from the bottom.
+        function resyncBubble(bubble) {
+            const rise = bubble.getAnimations().find((a) => a.animationName === 'project-rise');
+            if (!rise || rise.startTime === null || bubble.riseStart == null) return;
+            const period = riseDuration * 1000;
+            const behind = (((rise.startTime - bubble.riseStart) % period) + period) % period;
+            if (behind < 5 || behind > period - 5) return;
+            const into = (((rise.currentTime - rise.effect.getTiming().delay) % period) + period) % period;
+            rise.currentTime += into + behind < period ? behind : behind - period;
         }
 
         let lastFrame = null;
@@ -1070,20 +1090,39 @@
             const fishRects = [...fishState.values()].map((state) => state.pos.box);
             const bubbles = [...document.querySelectorAll('.project-bubble:not(.popping, .waiting)')].map((el) => {
                 const r = el.getBoundingClientRect();
-                return { el, cx: r.left + r.width / 2, cy: r.top + r.height / 2, radius: r.width / 2 };
+                const stopped = el.matches(':hover, :focus-within'); // held still so someone can click it
+                return { el, cx: r.left + r.width / 2, cy: r.top + r.height / 2, radius: r.width / 2, stopped, rise: stopped ? 0 : riseSpeed };
             });
+            const popped = new Set();
+            const pop = (b) => {
+                if (popped.has(b)) return;
+                popped.add(b);
+                popBubble(b.el);
+            };
 
-            bubbles.forEach(({ el, cx, cy, radius }) => {
+            bubbles.forEach((b) => {
                 // Leave a bubble alone while someone is about to click it
-                if (el.matches(':hover, :focus-within')) return;
+                if (b.stopped) return;
 
                 // Only the upper half of the glass counts, so bubbles can enter from below
-                const hitTop = cy < bowlY && Math.hypot(cx - bowlX, cy - bowlY) + radius >= bowlRadius;
-                const hitFish = fishRects.some((fr) => circleHitsRect(cx, cy, radius, fr));
-                if (hitTop || hitFish) popBubble(el);
+                const hitTop = b.cy < bowlY && Math.hypot(b.cx - bowlX, b.cy - bowlY) + b.radius >= bowlRadius;
+                const hitFish = fishRects.some((fr) => circleHitsRect(b.cx, b.cy, b.radius, fr));
+                if (hitTop || hitFish) pop(b);
             });
 
-            steerFish(dt, now, bubbles, bowlRect);
+            // A bubble that rises into a stopped one pops. Two moving ones only touch once a stop has put one
+            // out of step; then the lower one, the one rising into the other, pops.
+            bubbles.forEach((a, i) => bubbles.slice(i + 1).forEach((b) => {
+                if (popped.has(a) || popped.has(b) || Math.hypot(a.cx - b.cx, a.cy - b.cy) >= a.radius + b.radius) return;
+                const loser = a.stopped ? b : b.stopped ? a : (a.cy > b.cy ? a : b);
+                if (!loser.stopped) pop(loser);
+            }));
+
+            document.querySelectorAll('.project-bubble.popping').forEach((el) => {
+                if (now - el.poppedAt > 300) resyncBubble(el); // once its pop has faded
+            });
+
+            steerFish(dt, now, bubbles.filter((b) => !popped.has(b)), bowlRect);
             requestAnimationFrame(tick);
         }
 
