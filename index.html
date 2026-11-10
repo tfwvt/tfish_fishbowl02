@@ -166,7 +166,7 @@
             height: var(--size, 88px);
             margin-left: calc(var(--size, 88px) / -2);
             pointer-events: auto;
-            animation: project-rise var(--dur, 16s) linear infinite;
+            animation: project-rise var(--dur, 16s) linear infinite backwards;
         }
 
         .project-bubble-inner {
@@ -209,8 +209,9 @@
             box-shadow: inset 0 0 24px rgba(74, 222, 128, 0.4), 0 0 24px rgba(74, 222, 128, 0.45);
         }
 
-        /* An invisible popped bubble must not count as hovered (it would pause the tank) */
-        .project-bubble.popping {
+        /* An invisible popped or still-waiting bubble must not count as hovered (it would pause the tank) */
+        .project-bubble.popping,
+        .project-bubble.waiting {
             pointer-events: none;
         }
 
@@ -611,6 +612,10 @@
             { title: 'Project Two', description: placeholderText, image: placeholderImage('Project Two', 190) },
             { title: 'Project Three', description: placeholderText, image: placeholderImage('Project Three', 45) },
             { title: 'Project Four', description: placeholderText, image: placeholderImage('Project Four', 280) },
+            { title: 'Project Five', description: placeholderText, image: placeholderImage('Project Five', 330) },
+            { title: 'Project Six', description: placeholderText, image: placeholderImage('Project Six', 15) },
+            { title: 'Project Seven', description: placeholderText, image: placeholderImage('Project Seven', 100) },
+            { title: 'Project Eight', description: placeholderText, image: placeholderImage('Project Eight', 230) },
         ];
 
         // Simple generated landscape so each project has an image until real ones are added
@@ -694,7 +699,7 @@
             const popX = pop.left + pop.width / 2;
             const popY = pop.top + pop.height / 2;
             const popRadius = pop.width / 2;
-            const others = [...document.querySelectorAll('.project-bubble:not(.popping)')]
+            const others = [...document.querySelectorAll('.project-bubble:not(.popping, .waiting)')]
                 .filter((b) => b !== bubble)
                 .map((b) => {
                     const o = b.getBoundingClientRect();
@@ -858,20 +863,30 @@
             if (e.key === 'Escape') closeDetail();
         });
 
+        // Bubbles take turns between a left and a right lane. With eight rising only ~80px apart,
+        // neighbours would overlap if they could land in the same spot.
+        const laneLeft = (i) => `${(i % 2 ? 58 : 28) + Math.random() * 14}%`;
+
+        // Still bubbles for reduced motion, as [left, centre height] in % of the bowl: rows of 3, 2 and 3.
+        // Room for eight; add spots here if you add more projects.
+        const stillSpots = [[26, 32], [50, 32], [74, 32], [38, 54], [62, 54], [26, 76], [50, 76], [74, 76]];
+
         projects.forEach((project, i) => {
             const bubble = document.createElement('div');
             bubble.className = 'project-bubble';
             bubble.style.setProperty('--size', `${76 + Math.random() * 24}px`);
             bubble.style.setProperty('--dur', `${riseDuration}s`);
             bubble.style.setProperty('--sway', `${3 + Math.random() * 2}s`);
-            bubble.style.left = `${30 + Math.random() * 40}%`;
-            // Negative delay spreads them up the tank on load instead of all starting at the bottom
-            bubble.style.animationDelay = `${-(i / projects.length) * riseDuration}s`;
+            bubble.style.left = laneLeft(i);
+            // The tank starts empty: each bubble sets off from the bottom in turn, spaced evenly
+            // through the first rise. Until its turn it waits, unseen, below the glass.
+            bubble.style.animationDelay = `${(i / projects.length) * riseDuration}s`;
 
             if (reduceMotion) {
                 bubble.style.animation = 'none';
-                bubble.style.bottom = `${20 + (i % 3) * 22}%`;
-                bubble.style.left = `${25 + (i % 2) * 50}%`;
+                const [left, height] = stillSpots[i % stillSpots.length];
+                bubble.style.left = `${left}%`;
+                bubble.style.bottom = `calc(${height}% - var(--size) / 2)`;
             }
 
             const button = document.createElement('button');
@@ -886,10 +901,21 @@
                 popBubble(bubble);
             });
 
+            // A waiting bubble is out of the tab order and ignored by the fish until it sets off
+            if (!reduceMotion) {
+                bubble.classList.add('waiting');
+                button.tabIndex = -1;
+                bubble.addEventListener('animationstart', (e) => {
+                    if (e.target !== bubble) return;
+                    bubble.classList.remove('waiting');
+                    button.tabIndex = 0;
+                });
+            }
+
             // New x position each time it re-enters from the bottom; a popped bubble respawns
             bubble.addEventListener('animationiteration', (e) => {
                 if (e.target !== bubble) return;
-                bubble.style.left = `${30 + Math.random() * 40}%`;
+                bubble.style.left = laneLeft(i);
                 bubble.classList.remove('popping');
                 button.tabIndex = 0;
             });
@@ -921,7 +947,7 @@
             const bowlRadius = bowlRect.width / 2;
             fishState.forEach((state, fish) => { state.pos = readFish(fish, state); });
             const fishRects = [...fishState.values()].map((state) => state.pos.box);
-            const bubbles = [...document.querySelectorAll('.project-bubble:not(.popping)')].map((el) => {
+            const bubbles = [...document.querySelectorAll('.project-bubble:not(.popping, .waiting)')].map((el) => {
                 const r = el.getBoundingClientRect();
                 return { el, cx: r.left + r.width / 2, cy: r.top + r.height / 2, radius: r.width / 2 };
             });
