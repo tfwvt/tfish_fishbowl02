@@ -647,15 +647,46 @@
                 width: fish.offsetWidth,
                 height: fish.offsetHeight,
                 pos: null, // where it's drawn this frame, from readFish
+                trackY: 0, // how far startles have moved the fish's track up or down from its swim path
+                plan: [], planStart: 0, planAge: Infinity, // the swerve it's following, and when it started
                 avoidY: 0, vy: 0, tilt: 0, dir: 1, speed: 0, lastX: null, dart: null,
                 applied: { x: 0, y: 0 }, // the on-screen offset set last frame, taken back off the measured position
             });
         });
-        const steerSpeed = 90;  // px/s a fish can swerve: slow enough that some still bump into bubbles
-        const relaxSpeed = 35;  // px/s it drifts back to its normal path
+        const relaxSpeed = 35;  // px/s it drifts back to its track
         const steerAccel = 300; // px/s² a swerve can speed up, slow down or reverse, so changes of course ease in and out
-        const maxSwerve = 100;
         const riseSpeed = 640 / riseDuration; // px/s, matches the project-rise keyframes
+
+        // Swerve planning. A swerve is a list of [speed, seconds] stages (up is -), then a drift back to the
+        // track. A few times a second each fish plays some swerves a few seconds ahead against where every
+        // bubble will have risen to, and follows the gentlest one that gets past them all.
+        const planEvery = 0.08;  // s between re-plans
+        const planHorizon = 4.5; // s each swerve is played ahead
+        const planStep = 0.1;    // s between checks along a swerve
+        const planSpeeds = [-90, -60, -40, -20, 0, 20, 40, 60, 90]; // px/s
+        // One-stage swerves, tried every time
+        const simpleSwerves = [0.8, 1.6, planHorizon].flatMap((d) => planSpeeds.map((v) => [[v, d]]));
+        // Two-stage swerves, to thread one gap and then the next; only searched when nothing simpler gets
+        // through, gentlest first
+        const swerveEffort = (stages) => stages.reduce((sum, [v, d]) => sum + Math.abs(v) * Math.min(d, 2), 0);
+        const twoStageSwerves = [0.4, 0.8, 1.5, 2.5].flatMap((d1) => planSpeeds.flatMap((v1) =>
+            [0.8, 1.6, 3].flatMap((d2) => planSpeeds.map((v2) => [[v1, d1], [v2, d2]]))))
+            .sort((a, b) => swerveEffort(a) - swerveEffort(b));
+
+        // Fish keep their centre within this part of the bowl's height, so swerves and darts stay in the water
+        function waterLimits(bowlRect) {
+            return [bowlRect.top + bowlRect.height * 0.16, bowlRect.top + bowlRect.height * 0.84];
+        }
+        // Slow a swerve as the fish nears the edge of the water, so it eases to a stop there rather than hitting it
+        const edgeEase = 3; // 1/s
+        function easeAtEdge(want, y, waterMin, waterMax) {
+            return Math.max(-(y - waterMin) * edgeEase, Math.min((waterMax - y) * edgeEase, want));
+        }
+        // Startles move a fish's track, but only within the middle of the bowl. Every bubble rises right to the
+        // top, so a fish pushed up there would have nowhere left to dodge.
+        function trackLimits(bowlRect) {
+            return [bowlRect.top + bowlRect.height * 0.25, bowlRect.top + bowlRect.height * 0.7];
+        }
 
         // Read where a fish is drawn, once per frame, for both the bubble hit test and the steering:
         // its centre, which way it faces, its scale (the swim keyframes shrink one fish and mirror
@@ -680,18 +711,39 @@
         const mix = (a, b, k) => ({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, rot: a.rot + (b.rot - a.rot) * k });
 
         // Dart out over 0.35s, hold, then drift back over 1.8s
-        function dartOffset(state, now) {
-            const d = state.dart;
+        function dartAt(d, now) {
             if (!d) return noOffset;
             const t = (now - d.start) / 1000;
             if (t < 0.35) return mix(d.from, d.to, smoothstep(t / 0.35));
             if (t < 0.7) return d.to;
             if (t < 2.5) return mix(d.to, noOffset, smoothstep((t - 0.7) / 1.8));
-            state.dart = null;
             return noOffset;
         }
+        function dartOffset(state, now) {
+            if (state.dart && now - state.dart.start >= 2500) state.dart = null;
+            return dartAt(state.dart, now);
+        }
 
-        // Fish near a popped bubble dart away from it, then drift back to their swim path
+        // When (in s) a fish swimming on at its speed first bumps a bubble, if it's at height ys[k] at time
+        // (k + 1) * planStep; Infinity if it never does. The hit test, a few px wider, against each bubble
+        // risen that much further.
+        function firstBump(state, fishX, ys, reachX, clearance, near) {
+            const speed = Math.max(state.speed, 20);
+            for (let k = 0; k < ys.length; k++) {
+                const t = (k + 1) * planStep;
+                const x = fishX + state.dir * speed * t;
+                const y = ys[k];
+                for (const { cx, cy, radius } of near) {
+                    const by = cy - riseSpeed * t;
+                    const dx = cx - Math.max(x - reachX, Math.min(cx, x + reachX));
+                    const dy = by - Math.max(y - clearance, Math.min(by, y + clearance));
+                    if (dx * dx + dy * dy < (radius + 6) ** 2) return t;
+                }
+            }
+            return Infinity;
+        }
+
+        // Fish near a popped bubble dart away from it, then settle only halfway back
         function startleFish(bubble) {
             if (reduceMotion) return;
             const now = performance.now();
@@ -706,9 +758,13 @@
                     return { cx: o.left + o.width / 2, cy: o.top + o.height / 2, radius: o.width / 2 };
                 });
 
+            const bowlRect = bowl.getBoundingClientRect();
+            const [waterMin, waterMax] = waterLimits(bowlRect);
+            const [trackMin, trackMax] = trackLimits(bowlRect);
+
             fishState.forEach((state) => {
                 if (!state.pos) return;
-                const { box, cx: fishX, cy: fishY, halfHeight } = state.pos;
+                const { box, cx: fishX, cy: fishY, halfWidth, halfHeight } = state.pos;
                 // Only fish close to the bubble react: measure from its edge to the nearest point of the fish
                 const nearestX = Math.max(box.left, Math.min(popX, box.right));
                 const nearestY = Math.max(box.top, Math.min(popY, box.bottom));
@@ -720,33 +776,110 @@
                 // Flee straight up or down, away from the pop, and keep swimming forward. Fleeing
                 // sideways would back the fish up tail-first when the pop is ahead of it, or on the drift back.
                 const away = dy < 0 ? -1 : 1; // -1 = up
-                // Cut the dart short rather than flee straight into another bubble
-                while (push > 10 && others.some((o) =>
-                    Math.hypot(fishX - o.cx, fishY + away * push - o.cy) < o.radius + halfHeight + 10)) {
-                    push *= 0.7;
-                }
+                push = Math.min(push, Math.max(0, away < 0 ? fishY - waterMin : waterMax - fishY)); // stay in the water
 
                 // Nose points along the dart: up when fleeing upward, down when fleeing downward
                 const tilt = state.dir * away * (8 + Math.random() * 8);
-                state.dart = {
-                    start: now,
-                    from: dartOffset(state, now),
-                    to: { x: 0, y: away * push, rot: tilt },
+                // The fish's track moves by half the dart, so it drifts back only halfway. The dart is measured
+                // from the new track, shifted so the fish doesn't jump.
+                const pathY = fishY - state.applied.y;
+                const current = dartOffset(state, now);
+                const makeDart = (size) => {
+                    const trackY = Math.max(trackMin - pathY, Math.min(trackMax - pathY, state.trackY + away * size / 2));
+                    const shift = trackY - state.trackY;
+                    const dart = { start: now, from: { ...current, y: current.y - shift }, to: { x: 0, y: away * size - shift, rot: tilt } };
+                    // Where it takes the fish over the next 2s, to check against the other bubbles
+                    const ys = Array.from({ length: 20 }, (_, k) =>
+                        pathY + trackY + state.avoidY + dartAt(dart, now + (k + 1) * planStep * 1000).y);
+                    return { trackY, dart, bumpAt: firstBump(state, fishX, ys, halfWidth * 0.7, halfHeight * 0.6, others) };
                 };
+                // The full dart if its path stays clear of the other bubbles, else the longest shorter one that
+                // does, else whichever bumps latest
+                const options = [1, 0.7, 0.5, 0.3, 0.15].map((k) => makeDart(push * k));
+                const pick = options.find((o) => o.bumpAt === Infinity)
+                    ?? options.reduce((a, b) => (b.bumpAt > a.bumpAt ? b : a));
+                state.trackY = pick.trackY;
+                state.dart = pick.dart;
             });
         }
 
-        // Look ahead along each fish's path and ease up or down around any bubble in the way
-        function steerFish(dt, now, bubbles) {
+        // Pick the swerve a fish should follow from now: a list of stages, empty to drift back to its track
+        function planSwerve(state, now, fishX, fishY, baseY, reachX, clearance, bubbles, waterMin, waterMax) {
+            const speed = Math.max(state.speed, 20);
+            // Only bubbles the fish could reach within the horizon matter
+            const near = bubbles.filter(({ cx, radius }) => {
+                const ahead = (cx - fishX) * state.dir;
+                return ahead > -(radius + reachX) && ahead < speed * planHorizon + radius + reachX;
+            });
+            if (!near.length) return [];
+
+            const relaxV = (y) => Math.max(-relaxSpeed, Math.min(relaxSpeed, (baseY - y) * 2));
+            // A dart in progress carries on moving the fish, on top of the swerve
+            const dartNow = dartAt(state.dart, now).y;
+            const dartAhead = Array.from({ length: Math.round(planHorizon / planStep) }, (_, k) =>
+                dartAt(state.dart, now + (k + 1) * planStep * 1000).y - dartNow);
+            // Play a swerve ahead: when (if ever) it bumps a bubble, and how far off the track it strays
+            const play = (stages) => {
+                let y = fishY - dartNow, vel = state.vy, stray = 0;
+                const ys = dartAhead.map((dart, k) => {
+                    const t = (k + 1) * planStep;
+                    let want = null;
+                    for (let i = 0, end = 0; i < stages.length && want === null; i++) {
+                        end += stages[i][1];
+                        if (t <= end) want = stages[i][0];
+                    }
+                    const target = easeAtEdge(want ?? relaxV(y), y, waterMin, waterMax);
+                    vel += Math.max(-steerAccel * planStep, Math.min(steerAccel * planStep, target - vel));
+                    y = Math.max(waterMin, Math.min(waterMax, y + vel * planStep));
+                    stray += Math.abs(y - baseY) * planStep;
+                    return y + dartNow + dart;
+                });
+                return { stages, bumpAt: firstBump(state, fishX, ys, reachX, clearance, near), stray };
+            };
+
+            // Never bumping comes first, then a later bump over an earlier one; after that, stray little, swerve
+            // gently, and stick with the current swerve rather than flip-flopping
+            const firstSpeed = (stages) => (stages.length ? stages[0][0] : relaxV(fishY));
+            const currentSpeed = firstSpeed(remainingStages(state, now));
+            const cost = ({ stages, bumpAt, stray }) => (bumpAt < Infinity ? 1e4 + 1e3 * (planHorizon - bumpAt) : 0)
+                + stray * 0.25 + swerveEffort(stages) * 0.5 + Math.abs(firstSpeed(stages) - currentSpeed) * 1.2;
+            let best = [remainingStages(state, now), [], ...simpleSwerves]
+                .map(play).reduce((a, b) => (cost(b) < cost(a) ? b : a));
+
+            // Nothing simple gets through: look for a two-stage swerve that does (not too often, as it's slower)
+            if (best.bumpAt < Infinity && now >= (state.searchAfter ?? 0)) {
+                const threads = twoStageSwerves.find((stages) => play(stages).bumpAt === Infinity);
+                if (threads) best = play(threads);
+                else state.searchAfter = now + 400;
+            }
+            return best.stages;
+        }
+
+        // What's left of the swerve a fish is following, from now
+        function remainingStages(state, now) {
+            let elapsed = (now - state.planStart) / 1000;
+            const left = [];
+            for (const [v, d] of state.plan) {
+                if (elapsed < d) left.push([v, d - elapsed]);
+                elapsed = Math.max(0, elapsed - d);
+            }
+            return left;
+        }
+
+        // Steer each fish round the bubbles ahead of it, swerving only as hard as it needs to
+        function steerFish(dt, now, bubbles, bowlRect) {
+            const [waterMin, waterMax] = waterLimits(bowlRect);
             fishState.forEach((state, fish) => {
                 const { cx: fishX, cy: fishY, halfWidth, halfHeight, facing, scale, scaleX } = state.pos;
                 const dart = dartOffset(state, now);
-                // Where the swim animation alone puts the fish: take off exactly the offset set last frame
-                const baseX = fishX - state.applied.x;
-                const baseY = fishY - state.applied.y;
-                const vx = state.lastX === null ? 0 : (baseX - state.lastX) / dt;
+                // Where the swim keyframes alone put the fish (the measured centre minus the offset set last
+                // frame), and its track: that path moved up or down by earlier startles
+                const pathX = fishX - state.applied.x;
+                const pathY = fishY - state.applied.y;
+                const baseY = pathY + state.trackY;
+                const vx = state.lastX === null ? 0 : (pathX - state.lastX) / dt;
                 if (Math.abs(vx) < 1000) state.speed += (Math.abs(vx) - state.speed) * Math.min(1, dt * 4); // ignore loop jumps
-                state.lastX = baseX;
+                state.lastX = pathX;
                 // Point the way the swim keyframes face the fish (mirrored = facing right), rather than
                 // guessing from frame-to-frame movement, which darts and swerves throw off
                 state.dir = facing;
@@ -754,56 +887,37 @@
                 // Match the hit test's inset box (15% / 20% trimmed off each side)
                 const reachX = halfWidth * 0.7;
                 const clearance = halfHeight * 0.6;
-                const speed = Math.max(state.speed, 20);
-
-                // Each bubble the fish will pass rules out a band of heights for the length of the pass.
-                // The bubble keeps rising meanwhile, so the band runs from its top at the end of the pass
-                // to its bottom at the start.
-                const bands = [];
-                bubbles.forEach(({ cx, cy, radius }) => {
-                    const ahead = (cx - baseX) * state.dir;
-                    const overlap = radius + reachX + 10;
-                    if (ahead < -overlap || ahead > overlap + 120) return;
-                    const tStart = Math.max(0, (ahead - overlap) / speed);
-                    const tEnd = Math.max(0, (ahead + overlap) / speed);
-                    bands.push([
-                        cy - riseSpeed * tEnd - radius - clearance - 6,
-                        cy - riseSpeed * tStart + radius + clearance + 6,
-                    ]);
-                });
-
-                // Pick the reachable height outside every band that's the smallest move, leaning toward
-                // ducking under (the bubble rises away) and toward the fish's normal path.
-                // Doubling back mid-swerve costs extra, so a fish doesn't dither between over and under.
-                let target = 0;
-                if (bands.length) {
-                    const blocked = (y) => bands.some(([top, bottom]) => y > top && y < bottom);
-                    const reverses = (y) => Math.abs(state.vy) > 10 && Math.sign(y - fishY) === -Math.sign(state.vy);
-                    const options = [fishY, baseY, ...bands.flatMap(([top, bottom]) => [top - 4, bottom + 4])]
-                        .filter((y) => Math.abs(y - baseY) <= maxSwerve);
-                    const cost = (y) => Math.abs(y - fishY) * (y > fishY ? 0.8 : 1) + Math.abs(y - baseY) * 0.3
-                        + (reverses(y) ? 40 : 0) + (blocked(y) ? 1000 : 0);
-                    const best = options.reduce((a, b) => (cost(b) < cost(a) ? b : a), fishY);
-                    target = best - baseY - dart.y;
+                state.planAge += dt;
+                if (state.planAge >= planEvery) {
+                    state.planAge = 0;
+                    state.plan = planSwerve(state, now, fishX, fishY, baseY, reachX, clearance, bubbles, waterMin, waterMax);
+                    state.planStart = now;
                 }
-                target = Math.max(-maxSwerve, Math.min(maxSwerve, target));
 
-                // Head for the target, but let the swerve speed build up and ease off rather than
-                // snapping, so changes of course are gradual
-                const maxSpeed = bands.length ? steerSpeed : relaxSpeed;
-                const wantVy = Math.max(-maxSpeed, Math.min(maxSpeed, (target - state.avoidY) * 4));
+                // Swerve at the planned speed, letting it build up and ease off rather than snapping
+                const stage = remainingStages(state, now)[0];
+                const wantVy = easeAtEdge(stage ? stage[0] : Math.max(-relaxSpeed, Math.min(relaxSpeed, -state.avoidY * 2)),
+                    baseY + state.avoidY, waterMin, waterMax);
                 const accel = steerAccel * dt;
                 state.vy += Math.max(-accel, Math.min(accel, wantVy - state.vy));
                 state.avoidY += state.vy * dt;
+                // Stay in the water (a backstop: the easing above normally stops it first)
+                const low = waterMin - baseY, high = waterMax - baseY;
+                if (state.avoidY < low || state.avoidY > high) {
+                    state.avoidY = Math.max(low, Math.min(high, state.avoidY));
+                    state.vy = 0;
+                }
 
                 // Nose follows the swerve: up when rising, down when diving
                 const tiltTarget = Math.max(-25, Math.min(25,
                     state.dir * Math.atan2(state.vy, Math.max(state.speed, 40)) * 180 / Math.PI));
-                state.tilt += (tiltTarget - state.tilt) * Math.min(1, dt * 6);
+                // Turning the nose no faster than 60°/s keeps quick weaves between bubbles from reading as a wiggle
+                const turn = (tiltTarget - state.tilt) * Math.min(1, dt * 4);
+                state.tilt += Math.max(-60 * dt, Math.min(60 * dt, turn));
 
                 // Worked out on screen, then set inside the wrapper: undo its scale, and mirror the
                 // tilt when the fish is turned round
-                state.applied = { x: dart.x, y: dart.y + state.avoidY };
+                state.applied = { x: dart.x, y: state.trackY + state.avoidY + dart.y };
                 const localX = Math.abs(scaleX) > 0.05 ? state.applied.x / scaleX : 0;
                 fish.style.translate = `${localX}px ${state.applied.y / scale}px`;
                 fish.style.rotate = `${(scaleX < 0 ? -1 : 1) * (dart.rot + state.tilt)}deg`;
@@ -871,10 +985,17 @@
         // Room for eight; add spots here if you add more projects.
         const stillSpots = [[26, 32], [50, 32], [74, 32], [38, 54], [62, 54], [26, 76], [50, 76], [74, 76]];
 
+        // A spread of sizes, from slightly smaller bubbles (68px) up to the biggest (100px), handed out at random
+        const bubbleSizes = projects.map((_, i) => 68 + (32 * i) / Math.max(1, projects.length - 1));
+        for (let i = bubbleSizes.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [bubbleSizes[i], bubbleSizes[j]] = [bubbleSizes[j], bubbleSizes[i]];
+        }
+
         projects.forEach((project, i) => {
             const bubble = document.createElement('div');
             bubble.className = 'project-bubble';
-            bubble.style.setProperty('--size', `${76 + Math.random() * 24}px`);
+            bubble.style.setProperty('--size', `${bubbleSizes[i]}px`);
             bubble.style.setProperty('--dur', `${riseDuration}s`);
             bubble.style.setProperty('--sway', `${3 + Math.random() * 2}s`);
             bubble.style.left = laneLeft(i);
@@ -962,7 +1083,7 @@
                 if (hitTop || hitFish) popBubble(el);
             });
 
-            steerFish(dt, now, bubbles);
+            steerFish(dt, now, bubbles, bowlRect);
             requestAnimationFrame(tick);
         }
 
