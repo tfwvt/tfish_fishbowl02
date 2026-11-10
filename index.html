@@ -32,7 +32,9 @@
             justify-content: center;
         }
 
-        /* Stellar Grain Filter Overlay */
+        /* Stellar Grain Filter Overlay.
+           A small seamless noise tile, repeated: drawing the noise once at full-window size was slow
+           on load and on every window resize. */
         .grain-overlay {
             position: fixed;
             top: 0;
@@ -42,7 +44,8 @@
             pointer-events: none;
             z-index: 100;
             opacity: var(--grain-opacity);
-            background: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+            background: url("data:image/svg+xml,%3Csvg width='256' height='256' viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.144' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+            background-size: 256px 256px;
         }
 
         /* Starfield Background */
@@ -57,7 +60,8 @@
                 radial-gradient(1px 1px at 85% 45%, #fff 50%, transparent 50%),
                 radial-gradient(1px 1px at 70% 70%, #fff 50%, transparent 50%);
             background-size: 400px 400px;
-            animation: drift 120s linear infinite;
+            /* 1px steps: a smooth sub-pixel drift made the browser redraw the whole window every frame */
+            animation: drift 120s steps(50) infinite;
             opacity: 0.3;
         }
 
@@ -108,7 +112,6 @@
                 inset 0 0 80px rgba(0, 0, 0, 0.8),
                 0 0 40px rgba(10, 46, 28, 0.5),
                 inset 0 20px 40px rgba(255, 255, 255, 0.05);
-            backdrop-filter: blur(2px);
         }
 
         /* Glass Reflection */
@@ -228,9 +231,8 @@
             to { translate: 10px 0; }
         }
 
-        /* Fish shouldn't block clicks on bubbles. Swerving and darting are set from JS
-           through translate/rotate, which stack on top of the swim keyframes' transform. */
-        .fish { pointer-events: none; }
+        /* Fish shouldn't block clicks on bubbles */
+        .fish-swim { pointer-events: none; }
 
         /* Project Detail: grows out of the clicked bubble to fill the bowl */
         .project-detail {
@@ -351,13 +353,22 @@
             .project-detail-body { transition: none; }
         }
 
-        /* Cartoon Triggerfish */
-        .fish {
+        /* Cartoon Triggerfish.
+           .fish-swim carries the swim keyframes; .fish inside it is tilted and nudged from JS
+           (swerving round bubbles, darting from pops) through translate/rotate. Keeping the two
+           apart lets the compositor run the swim without waiting on the page's script. */
+        .fish-swim {
             position: absolute;
             width: 80px;
             height: 50px;
             z-index: 5;
-            transition: transform 0.3s ease;
+        }
+
+        .fish {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            will-change: transform; /* its own layer, so the per-frame tilt doesn't repaint anything */
         }
 
         .fish-body {
@@ -373,7 +384,7 @@
             content: '';
             position: absolute;
             top: 20%;
-            right: 15%;
+            left: 15%;
             width: 8px;
             height: 8px;
             background: #000;
@@ -412,29 +423,32 @@
             clip-path: polygon(100% 0, 0 50%, 100% 100%);
         }
 
-        /* Animations for specific fish */
+        /* Animations for specific fish. They animate only `transform`, which the browser can run
+           off the main thread; animating left/top would need a layout on every frame.
+           The fish are drawn facing left; scaleX(-1) turns one to face right, so each swim
+           flips the fish whenever it heads right and it always swims head-first. The 51% step
+           sits 1/50 of the way along the return leg, so the path doesn't hitch during the flip. */
         .fish-1 { top: 30%; left: -100px; animation: swim1 18s linear infinite; }
-        .fish-2 { top: 60%; left: -100px; animation: swim2 24s linear infinite 2s; transform: scale(0.7); }
-        .fish-3 { top: 45%; right: -120px; animation: swim3 21s linear infinite 5s; transform: scale(1.2) scaleX(-1); }
+        .fish-2 { top: 60%; left: -100px; animation: swim2 24s linear infinite 2s; }
+        .fish-3 { top: 45%; right: -100px; animation: swim3 21s linear infinite 5s; }
 
         @keyframes swim1 {
-            0% { left: -100px; transform: translateY(0); }
-            /* 25% { transform: translateY(-20px) rotate(5deg); } */
-            50% { left: 550px; transform: translateY(10px); }
-            51% { transform: scaleX(-1); }
-            /* 75% { transform: translateY(-10px) rotate(-5deg); } */
-            100% { left: -100px; transform: translateY(0) scaleX(-1); }
+            0% { transform: translate(0, 0) scaleX(-1); }
+            50% { transform: translate(650px, 10px) scaleX(-1); }
+            51% { transform: translate(637px, 9.8px) scaleX(1); }
+            100% { transform: translate(0, 0) scaleX(1); }
         }
 
         @keyframes swim2 {
-            0% { left: -100px; }
-            100% { left: 550px; }
+            0% { transform: translateX(0) scale(-0.7, 0.7); }
+            100% { transform: translateX(650px) scale(-0.7, 0.7); }
         }
 
         @keyframes swim3 {
-            0% { right: -100px; transform: scaleX(-1) translateY(0); }
-            50% { right: 550px; transform: scaleX(-1) translateY(30px); }
-            100% { right: -100px; transform: scaleX(-1) translateY(0); }
+            0% { transform: translate(0, 0) scaleX(1); }
+            50% { transform: translate(-650px, 30px) scaleX(1); }
+            51% { transform: translate(-637px, 29.4px) scaleX(-1); }
+            100% { transform: translate(0, 0) scaleX(-1); }
         }
 
         /* Data Overlay */
@@ -508,30 +522,36 @@
                 </div>
                 
                 <!-- Fish 1 -->
-                <div class="fish fish-1">
-                    <div class="fin"></div>
-                    <div class="fish-body">
-                        <div class="fish-stripe"></div>
+                <div class="fish-swim fish-1">
+                    <div class="fish">
+                        <div class="fin"></div>
+                        <div class="fish-body">
+                            <div class="fish-stripe"></div>
+                        </div>
+                        <div class="tail"></div>
                     </div>
-                    <div class="tail"></div>
                 </div>
 
                 <!-- Fish 2 -->
-                <div class="fish fish-2">
-                    <div class="fin" style="background: #ef4444;"></div>
-                    <div class="fish-body" style="background: #f87171;">
-                        <div class="fish-stripe"></div>
+                <div class="fish-swim fish-2">
+                    <div class="fish">
+                        <div class="fin" style="background: #ef4444;"></div>
+                        <div class="fish-body" style="background: #f87171;">
+                            <div class="fish-stripe"></div>
+                        </div>
+                        <div class="tail" style="background: #ef4444;"></div>
                     </div>
-                    <div class="tail" style="background: #ef4444;"></div>
                 </div>
 
                 <!-- Fish 3 -->
-                <div class="fish fish-3">
-                    <div class="fin" style="background: #3b82f6;"></div>
-                    <div class="fish-body" style="background: #60a5fa;">
-                        <div class="fish-stripe"></div>
+                <div class="fish-swim fish-3">
+                    <div class="fish">
+                        <div class="fin" style="background: #3b82f6;"></div>
+                        <div class="fish-body" style="background: #60a5fa;">
+                            <div class="fish-stripe"></div>
+                        </div>
+                        <div class="tail" style="background: #3b82f6;"></div>
                     </div>
-                    <div class="tail" style="background: #3b82f6;"></div>
                 </div>
             </div>
             <div class="etching-label">media solve web</div>
@@ -610,33 +630,44 @@
         const projectLayer = document.getElementById('project-layer');
         const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
         const riseDuration = 16;
-        const startleRadius = 260;
+        const startleGap = 40; // px from the popped bubble's edge to a fish's body for that fish to dart away
 
-        // Per-fish steering state: a swerve around bubbles plus an optional startle dart
+        // Per-fish steering state: a swerve around bubbles plus an optional startle dart.
+        // The swim keyframes move, turn and scale each fish's .fish-swim wrapper; the steering
+        // nudges and tilts the .fish inside it.
         const fishState = new Map();
         document.querySelectorAll('.fish').forEach((fish) => {
-            fishState.set(fish, { avoidY: 0, tilt: 0, dir: 1, lastX: null, dart: null });
+            fishState.set(fish, {
+                swim: fish.parentElement,
+                width: fish.offsetWidth,
+                height: fish.offsetHeight,
+                pos: null, // where it's drawn this frame, from readFish
+                avoidY: 0, vy: 0, tilt: 0, dir: 1, speed: 0, lastX: null, dart: null,
+                applied: { x: 0, y: 0 }, // the on-screen offset set last frame, taken back off the measured position
+            });
         });
         const steerSpeed = 90;  // px/s a fish can swerve: slow enough that some still bump into bubbles
         const relaxSpeed = 35;  // px/s it drifts back to its normal path
+        const steerAccel = 300; // px/s² a swerve can speed up, slow down or reverse, so changes of course ease in and out
         const maxSwerve = 100;
         const riseSpeed = 640 / riseDuration; // px/s, matches the project-rise keyframes
 
-        // The swim keyframes scale some fish; read it so hit boxes and clearances match what's drawn
-        function fishScale(fish) {
-            const m = new DOMMatrixReadOnly(getComputedStyle(fish).transform);
-            return Math.hypot(m.a, m.b) || 1;
-        }
-
-        // Unrotated box around the fish, so tilting doesn't inflate it the way getBoundingClientRect would
-        function fishHitBox(fish) {
+        // Read where a fish is drawn, once per frame, for both the bubble hit test and the steering:
+        // its centre, which way it faces, its scale (the swim keyframes shrink one fish and mirror
+        // them to turn) and an unrotated box, since tilting would inflate getBoundingClientRect.
+        function readFish(fish, state) {
+            const m = new DOMMatrixReadOnly(getComputedStyle(state.swim).transform);
             const r = fish.getBoundingClientRect();
-            const s = fishScale(fish);
             const cx = r.left + r.width / 2;
             const cy = r.top + r.height / 2;
-            const w = fish.offsetWidth * s / 2;
-            const h = fish.offsetHeight * s / 2;
-            return { left: cx - w, right: cx + w, top: cy - h, bottom: cy + h, width: w * 2, height: h * 2 };
+            const scale = Math.abs(m.d) || 1; // only the x scale flips, so the y scale is the drawn size
+            const w = state.width * scale / 2;
+            const h = state.height * scale / 2;
+            return {
+                cx, cy, scale, scaleX: m.a, halfWidth: w, halfHeight: h,
+                facing: m.a < 0 ? 1 : -1, // drawn facing left; mirrored = facing right
+                box: { left: cx - w, right: cx + w, top: cy - h, bottom: cy + h, width: w * 2, height: h * 2 },
+            };
         }
         const noOffset = { x: 0, y: 0, rot: 0 };
 
@@ -662,6 +693,7 @@
             const pop = bubble.getBoundingClientRect();
             const popX = pop.left + pop.width / 2;
             const popY = pop.top + pop.height / 2;
+            const popRadius = pop.width / 2;
             const others = [...document.querySelectorAll('.project-bubble:not(.popping)')]
                 .filter((b) => b !== bubble)
                 .map((b) => {
@@ -669,53 +701,55 @@
                     return { cx: o.left + o.width / 2, cy: o.top + o.height / 2, radius: o.width / 2 };
                 });
 
-            fishState.forEach((state, fish) => {
-                const r = fish.getBoundingClientRect();
-                const dx = r.left + r.width / 2 - popX;
-                const dy = r.top + r.height / 2 - popY;
-                const dist = Math.hypot(dx, dy) || 1;
-                if (dist > startleRadius) return;
+            fishState.forEach((state) => {
+                if (!state.pos) return;
+                const { box, cx: fishX, cy: fishY, halfHeight } = state.pos;
+                // Only fish close to the bubble react: measure from its edge to the nearest point of the fish
+                const nearestX = Math.max(box.left, Math.min(popX, box.right));
+                const nearestY = Math.max(box.top, Math.min(popY, box.bottom));
+                const gap = Math.max(0, Math.hypot(popX - nearestX, popY - nearestY) - popRadius);
+                if (gap > startleGap) return;
 
-                let push = 30 + (1 - dist / startleRadius) * 70; // closer = bigger dart
+                const dy = fishY - popY;
+                let push = 30 + (1 - gap / startleGap) * 70; // closer = bigger dart
+                // Flee straight up or down, away from the pop, and keep swimming forward. Fleeing
+                // sideways would back the fish up tail-first when the pop is ahead of it, or on the drift back.
+                const away = dy < 0 ? -1 : 1; // -1 = up
                 // Cut the dart short rather than flee straight into another bubble
-                const fishX = r.left + r.width / 2;
-                const fishY = r.top + r.height / 2;
-                const halfHeight = fish.offsetHeight * fishScale(fish) / 2;
                 while (push > 10 && others.some((o) =>
-                    Math.hypot(fishX + (dx / dist) * push - o.cx, fishY + (dy / dist) * push - o.cy) < o.radius + halfHeight + 10)) {
+                    Math.hypot(fishX - o.cx, fishY + away * push - o.cy) < o.radius + halfHeight + 10)) {
                     push *= 0.7;
                 }
 
-                const tilt = (dx < 0 ? -1 : 1) * (8 + Math.random() * 8);
+                // Nose points along the dart: up when fleeing upward, down when fleeing downward
+                const tilt = state.dir * away * (8 + Math.random() * 8);
                 state.dart = {
                     start: now,
                     from: dartOffset(state, now),
-                    to: { x: (dx / dist) * push, y: (dy / dist) * push, rot: tilt },
+                    to: { x: 0, y: away * push, rot: tilt },
                 };
             });
         }
 
         // Look ahead along each fish's path and ease up or down around any bubble in the way
         function steerFish(dt, now, bubbles) {
-            const reads = [...fishState].map(([fish, state]) => {
-                const s = fishScale(fish);
-                return [fish, state, fish.getBoundingClientRect(), fish.offsetWidth * s / 2, fish.offsetHeight * s / 2];
-            });
-
-            reads.forEach(([fish, state, r, halfWidth, halfHeight]) => {
+            fishState.forEach((state, fish) => {
+                const { cx: fishX, cy: fishY, halfWidth, halfHeight, facing, scale, scaleX } = state.pos;
                 const dart = dartOffset(state, now);
-                // Where the swim animation alone puts the fish
-                const baseX = r.left + r.width / 2 - dart.x;
-                const baseY = r.top + r.height / 2 - dart.y - state.avoidY;
+                // Where the swim animation alone puts the fish: take off exactly the offset set last frame
+                const baseX = fishX - state.applied.x;
+                const baseY = fishY - state.applied.y;
                 const vx = state.lastX === null ? 0 : (baseX - state.lastX) / dt;
-                if (Math.abs(vx) > 5 && Math.abs(vx) < 1000) state.dir = Math.sign(vx); // ignore loop jumps
+                if (Math.abs(vx) < 1000) state.speed += (Math.abs(vx) - state.speed) * Math.min(1, dt * 4); // ignore loop jumps
                 state.lastX = baseX;
+                // Point the way the swim keyframes face the fish (mirrored = facing right), rather than
+                // guessing from frame-to-frame movement, which darts and swerves throw off
+                state.dir = facing;
 
-                const fishY = baseY + state.avoidY + dart.y; // where the fish actually is right now
                 // Match the hit test's inset box (15% / 20% trimmed off each side)
                 const reachX = halfWidth * 0.7;
                 const clearance = halfHeight * 0.6;
-                const speed = Math.max(Math.abs(vx), 20);
+                const speed = Math.max(state.speed, 20);
 
                 // Each bubble the fish will pass rules out a band of heights for the length of the pass.
                 // The bubble keeps rising meanwhile, so the band runs from its top at the end of the pass
@@ -734,31 +768,40 @@
                 });
 
                 // Pick the reachable height outside every band that's the smallest move, leaning toward
-                // ducking under (the bubble rises away) and toward the fish's normal path
+                // ducking under (the bubble rises away) and toward the fish's normal path.
+                // Doubling back mid-swerve costs extra, so a fish doesn't dither between over and under.
                 let target = 0;
                 if (bands.length) {
                     const blocked = (y) => bands.some(([top, bottom]) => y > top && y < bottom);
+                    const reverses = (y) => Math.abs(state.vy) > 10 && Math.sign(y - fishY) === -Math.sign(state.vy);
                     const options = [fishY, baseY, ...bands.flatMap(([top, bottom]) => [top - 4, bottom + 4])]
                         .filter((y) => Math.abs(y - baseY) <= maxSwerve);
                     const cost = (y) => Math.abs(y - fishY) * (y > fishY ? 0.8 : 1) + Math.abs(y - baseY) * 0.3
-                        + (blocked(y) ? 1000 : 0);
+                        + (reverses(y) ? 40 : 0) + (blocked(y) ? 1000 : 0);
                     const best = options.reduce((a, b) => (cost(b) < cost(a) ? b : a), fishY);
                     target = best - baseY - dart.y;
                 }
                 target = Math.max(-maxSwerve, Math.min(maxSwerve, target));
 
-                const step = (bands.length ? steerSpeed : relaxSpeed) * dt;
-                const move = Math.max(-step, Math.min(step, target - state.avoidY));
-                state.avoidY += move;
+                // Head for the target, but let the swerve speed build up and ease off rather than
+                // snapping, so changes of course are gradual
+                const maxSpeed = bands.length ? steerSpeed : relaxSpeed;
+                const wantVy = Math.max(-maxSpeed, Math.min(maxSpeed, (target - state.avoidY) * 4));
+                const accel = steerAccel * dt;
+                state.vy += Math.max(-accel, Math.min(accel, wantVy - state.vy));
+                state.avoidY += state.vy * dt;
 
                 // Nose follows the swerve: up when rising, down when diving
-                const vy = move / dt;
                 const tiltTarget = Math.max(-25, Math.min(25,
-                    state.dir * Math.atan2(vy, Math.max(Math.abs(vx), 40)) * 180 / Math.PI));
-                state.tilt += (tiltTarget - state.tilt) * Math.min(1, dt * 8);
+                    state.dir * Math.atan2(state.vy, Math.max(state.speed, 40)) * 180 / Math.PI));
+                state.tilt += (tiltTarget - state.tilt) * Math.min(1, dt * 6);
 
-                fish.style.translate = `${dart.x}px ${dart.y + state.avoidY}px`;
-                fish.style.rotate = `${dart.rot + state.tilt}deg`;
+                // Worked out on screen, then set inside the wrapper: undo its scale, and mirror the
+                // tilt when the fish is turned round
+                state.applied = { x: dart.x, y: dart.y + state.avoidY };
+                const localX = Math.abs(scaleX) > 0.05 ? state.applied.x / scaleX : 0;
+                fish.style.translate = `${localX}px ${state.applied.y / scale}px`;
+                fish.style.rotate = `${(scaleX < 0 ? -1 : 1) * (dart.rot + state.tilt)}deg`;
             });
         }
 
@@ -856,8 +899,6 @@
         });
 
         // Bubbles pop when they bump into a fish or reach the top of the bowl
-        const fishes = document.querySelectorAll('.fish');
-
         function circleHitsRect(cx, cy, radius, rect) {
             // Shrink the fish box a little since the body is a pointed polygon
             const insetX = rect.width * 0.15;
@@ -878,7 +919,8 @@
             const bowlX = bowlRect.left + bowlRect.width / 2;
             const bowlY = bowlRect.top + bowlRect.height / 2;
             const bowlRadius = bowlRect.width / 2;
-            const fishRects = [...fishes].map(fishHitBox);
+            fishState.forEach((state, fish) => { state.pos = readFish(fish, state); });
+            const fishRects = [...fishState.values()].map((state) => state.pos.box);
             const bubbles = [...document.querySelectorAll('.project-bubble:not(.popping)')].map((el) => {
                 const r = el.getBoundingClientRect();
                 return { el, cx: r.left + r.width / 2, cy: r.top + r.height / 2, radius: r.width / 2 };
