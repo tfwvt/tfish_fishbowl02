@@ -427,18 +427,19 @@
 
         /* Animations for specific fish. They animate only `transform`, which the browser can run
            off the main thread; animating left/top would need a layout on every frame.
-           The fish are drawn facing left; scaleX(-1) turns one to face right, so each swim
-           flips the fish whenever it heads right and it always swims head-first. The 51% step
+           The fish are drawn facing left; a negative x scale turns one to face right, so each swim
+           flips the fish whenever it heads right and it always swims head-first. The yellow (1) and
+           blue (3) fish are drawn at 85% and the red (2) at 70%. The 51% step
            sits 1/50 of the way along the return leg, so the path doesn't hitch during the flip. */
         .fish-1 { top: 30%; left: -100px; animation: swim1 18s linear infinite; }
         .fish-2 { top: 60%; left: -100px; animation: swim2 24s linear infinite 2s; }
         .fish-3 { top: 45%; right: -100px; animation: swim3 21s linear infinite 5s; }
 
         @keyframes swim1 {
-            0% { transform: translate(0, 0) scaleX(-1); }
-            50% { transform: translate(650px, 10px) scaleX(-1); }
-            51% { transform: translate(637px, 9.8px) scaleX(1); }
-            100% { transform: translate(0, 0) scaleX(1); }
+            0% { transform: translate(0, 0) scale(-0.85, 0.85); }
+            50% { transform: translate(650px, 10px) scale(-0.85, 0.85); }
+            51% { transform: translate(637px, 9.8px) scale(0.85); }
+            100% { transform: translate(0, 0) scale(0.85); }
         }
 
         @keyframes swim2 {
@@ -447,10 +448,10 @@
         }
 
         @keyframes swim3 {
-            0% { transform: translate(0, 0) scaleX(1); }
-            50% { transform: translate(-650px, 30px) scaleX(1); }
-            51% { transform: translate(-637px, 29.4px) scaleX(-1); }
-            100% { transform: translate(0, 0) scaleX(-1); }
+            0% { transform: translate(0, 0) scale(0.85); }
+            50% { transform: translate(-650px, 30px) scale(0.85); }
+            51% { transform: translate(-637px, 29.4px) scale(-0.85, 0.85); }
+            100% { transform: translate(0, 0) scale(-0.85, 0.85); }
         }
 
         /* 3D Picasso triggerfish. Its body is a stack of body-shaped slices, each a little smaller towards the
@@ -1299,6 +1300,47 @@
             return left;
         }
 
+        // The 3D triggerfish's turns (swim4) are timed by its keyframes. If it touches a bubble in the first half
+        // of a turn, it turns back the way it came once it's halfway round (playing the turn backwards), waits a
+        // moment facing the glass, then tries the turn again. Only an actual touch turns it back (tick records
+        // each fish's touches in touchedAt): with the bowl full of bubbles, turning back for any bubble that
+        // was merely on its way kept it stuck at the glass.
+        // Turns as fractions of a swim4 loop: when each starts and its halfway point.
+        const triggerfishTurns = [{ start: 0.36, half: 0.43 }, { start: 0.86, half: 0.93 }];
+        const turnRetryAfter = 800; // ms it waits facing the glass before trying the turn again
+        function guardTriggerfishTurn(state, now) {
+            const swim = state.swim.getAnimations().find((a) => a.animationName === 'swim4');
+            if (!swim || !state.pos) return;
+            const { progress, currentIteration } = swim.effect.getComputedTiming();
+            if (progress === null) return; // still swimming in (swim4-enter)
+            const turn = state.turn ??= { mode: 'swim', last: progress, touched: null };
+            const timeAt = (p) => swim.effect.getTiming().delay + (currentIteration + p) * swim.effect.getTiming().duration;
+
+            if (turn.mode === 'swim') {
+                const firstHalf = triggerfishTurns.find((t) => progress >= t.start && progress < t.half);
+                if (firstHalf && state.touchedAt === now) turn.touched = firstHalf;
+                const reachedHalf = triggerfishTurns.find((t) => turn.last < t.half && progress >= t.half);
+                if (reachedHalf) {
+                    if (turn.touched === reachedHalf) {
+                        turn.mode = 'back';
+                        turn.at = reachedHalf;
+                        swim.playbackRate = -1;
+                    }
+                    turn.touched = null;
+                }
+            } else if (turn.mode === 'back' && progress <= turn.at.start) {
+                swim.pause();
+                swim.currentTime = timeAt(turn.at.start);
+                turn.mode = 'wait';
+                turn.waitUntil = now + turnRetryAfter;
+            } else if (turn.mode === 'wait' && now >= turn.waitUntil) {
+                swim.playbackRate = 1;
+                swim.play();
+                turn.mode = 'swim';
+            }
+            turn.last = swim.effect.getComputedTiming().progress;
+        }
+
         // Steer each fish round the bubbles ahead of it, swerving only as hard as it needs to
         function steerFish(dt, now, bubbles, bowlRect) {
             const [waterMin, waterMax] = waterLimits(bowlRect);
@@ -1457,6 +1499,11 @@
             // turning round or (like the red fish) from the other side
             const out = school.dir > 0 ? school.x - school.halfWidth > size + 20 : school.x + school.halfWidth < -20;
             if (out) {
+                // While the window isn't active it stays out of sight (see pageActive)
+                if (!pageActive) {
+                    school.waitUntil = 0;
+                    return;
+                }
                 school.waitUntil ||= now + 1000 + Math.random() * 3000;
                 if (now < school.waitUntil) return;
                 school.waitUntil = 0;
@@ -1787,7 +1834,6 @@
             const bowlRadius = bowlRect.width / 2;
             fishState.forEach((state, fish) => { state.pos = readFish(fish, state); });
             const readoutRects = readouts.map((el) => el.getBoundingClientRect());
-            const fishRects = [...fishState.values()].map((state) => state.pos.box);
             const bubbles = [...document.querySelectorAll('.project-bubble:not(.popping, .waiting)')].map((el) => {
                 const r = el.getBoundingClientRect();
                 const stopped = el.matches(':hover, :focus-within'); // held still so someone can click it
@@ -1804,13 +1850,16 @@
             };
 
             bubbles.forEach((b) => {
+                // Note which fish touch it (the triggerfish turns back from a touch mid-turn), even a held bubble
+                const touching = [...fishState.values()].filter((st) => circleHitsRect(b.cx, b.cy, b.radius, st.pos.box));
+                touching.forEach((st) => { st.touchedAt = now; });
+
                 // Leave a bubble alone while someone is about to click it
                 if (b.stopped) return;
 
                 // Only the upper half of the glass counts, so bubbles can enter from below
                 const hitTop = b.cy < bowlY && Math.hypot(b.cx - bowlX, b.cy - bowlY) + b.radius >= bowlRadius;
-                const hitFish = fishRects.some((fr) => circleHitsRect(b.cx, b.cy, b.radius, fr));
-                if (hitTop || hitFish) pop(b);
+                if (hitTop || touching.length) pop(b);
             });
 
             // A bubble that rises into a stopped one pops. Two moving ones only touch once a stop has put one
@@ -1826,6 +1875,9 @@
             });
 
             steerFish(dt, now, bubbles.filter((b) => !popped.has(b)), bowlRect);
+            fishState.forEach((state) => {
+                if (state.swim.classList.contains('fish-4')) guardTriggerfishTurn(state, now);
+            });
             if (show.school) swimSchool(dt, now, bubbles.filter((b) => !popped.has(b)), bowlRect);
 
             readouts.forEach((el, i) => {
@@ -1838,6 +1890,83 @@
                 }
             });
             requestAnimationFrame(tick);
+        }
+
+        // While the window isn't active (another window or app has focus, or the tab is hidden), fish that swim
+        // off the edge of the bowl wait there instead of coming back in; once it's active again they carry on.
+        // The big fish's swims are CSS keyframes, so each is paused at the next point where its keyframes have it
+        // out of sight: these fractions of its loop. One already out of sight is paused where it is. The school
+        // checks pageActive itself. The triggerfish never leaves the bowl, so it just carries on.
+        const offstageAt = { swim1: [0, 0.5], swim2: [0], swim3: [0, 0.5] };
+        let pageActive = !document.hidden && document.hasFocus();
+        const holdAt = new Map();      // swim animation -> the time in it to pause at
+        const heldByUs = new Set();    // swim animations paused here, to start again when the window's active
+        let releaseTimers = [];        // the fish come back one by one, not all at once
+
+        function bigFishSwims() {
+            return [...document.querySelectorAll('.fish-swim:not(.fish-4)')].flatMap((swim) =>
+                swim.getAnimations().filter((a) => a.animationName in offstageAt).map((anim) => ({ swim, anim })));
+        }
+        // The next time from now (in the animation's own time) that its keyframes put the fish out of sight
+        function nextOffstage(anim) {
+            const { delay, duration } = anim.effect.getTiming();
+            const into = anim.currentTime - delay;
+            const loop = Math.floor(into / duration);
+            return Math.min(...[loop, loop + 1].flatMap((k) => offstageAt[anim.animationName].map((f) => delay + (k + f) * duration))
+                .filter((t) => t >= anim.currentTime));
+        }
+        function outOfSight(swim) {
+            const fish = swim.querySelector('.fish').getBoundingClientRect();
+            const glass = bowl.getBoundingClientRect();
+            return fish.right <= glass.left || fish.left >= glass.right;
+        }
+        function hold(anim, at) {
+            if (at !== undefined) anim.currentTime = at;
+            anim.pause();
+            heldByUs.add(anim);
+            holdAt.delete(anim);
+        }
+        // Pause each swim as it reaches its hold point. Its own loop, so it also runs for reduced motion (no tick).
+        // When a hidden tab comes back the swims will have run on past their hold points; this winds them back
+        // before anything is drawn, so the fish still come back in from the edge.
+        function holdFishOffstage() {
+            if (pageActive) return;
+            holdAt.forEach((at, anim) => {
+                if (anim.playState !== 'running') holdAt.delete(anim); // removed with its fish, or already paused
+                else if (anim.currentTime >= at) hold(anim, at);
+            });
+            if (holdAt.size) requestAnimationFrame(holdFishOffstage);
+        }
+        function setPageActive(active) {
+            if (active === pageActive) return;
+            pageActive = active;
+            if (!active) {
+                releaseTimers.forEach(clearTimeout); // any not yet released stay held
+                releaseTimers = [];
+                bigFishSwims().forEach(({ swim, anim }) => {
+                    if (anim.playState !== 'running') return;
+                    if (anim.currentTime < anim.effect.getTiming().delay || outOfSight(swim)) hold(anim);
+                    else holdAt.set(anim, nextOffstage(anim));
+                });
+                requestAnimationFrame(holdFishOffstage);
+            } else {
+                holdAt.clear();
+                // Release them in a random order, spread over a few seconds
+                [...heldByUs].sort(() => Math.random() - 0.5).forEach((anim, i) => {
+                    releaseTimers.push(setTimeout(() => {
+                        heldByUs.delete(anim);
+                        if (anim.playState === 'paused') anim.play();
+                    }, i === 0 ? 0 : i * 1500 + Math.random() * 1000));
+                });
+            }
+        }
+        const checkActive = () => setPageActive(!document.hidden && document.hasFocus());
+        window.addEventListener('blur', checkActive);
+        window.addEventListener('focus', checkActive);
+        document.addEventListener('visibilitychange', checkActive);
+        if (!pageActive) {
+            pageActive = true;
+            setPageActive(false);
         }
 
         if (!reduceMotion) requestAnimationFrame(tick);
