@@ -799,9 +799,9 @@
                 <span class="stat-label">OXYGEN</span>
                 <span class="stat-value">98.2%</span>
             </button>
-            <button class="stat-item stat-depth" id="school-toggle" type="button" aria-pressed="false" title="Turn the school of fish on or off">
+            <button class="stat-item stat-depth" id="school-toggle" type="button" aria-pressed="true" title="Turn the school of fish on or off">
                 <span class="stat-label">DEPTH</span>
-                <span class="stat-value">2ft</span>
+                <span class="stat-value">8ft</span>
             </button>
             <button class="stat-item" id="triggerfish-toggle" type="button" aria-pressed="false" title="Turn the 3D fish on or off">
                 <span class="stat-label">TEMP</span>
@@ -1014,7 +1014,7 @@
         const toggle = (name, on) => (params.has(name) ? !['0', 'false', 'off', 'no'].includes(params.get(name)) : on);
         const show = {
             fish: toggle('fish', true),
-            school: toggle('school', false),
+            school: toggle('school', true),
             triggerfish: toggle('triggerfish', false),
         };
         // The creatures can be turned on and off while the page runs (see setFish, setTriggerfish and setSchool),
@@ -1968,6 +1968,37 @@
             pageActive = true;
             setPageActive(false);
         }
+
+        // The oxygen and temp readouts drift a little. Each change comes after a random wait of about `every` ms.
+        function driftReadout(el, { every, start, step, format }) {
+            const value = el.querySelector('.stat-value');
+            let v = start;
+            const next = () => {
+                v = step(v);
+                value.textContent = format(v);
+                setTimeout(next, every * (0.85 + Math.random() * 0.3));
+            };
+            setTimeout(next, every * (0.85 + Math.random() * 0.3));
+        }
+        // Oxygen: about every 30s, a small random step pulled back towards 98.2%, kept within 97.6-98.8%
+        driftReadout(fishToggle, {
+            every: 30000, start: 98.2, format: (v) => `${v.toFixed(1)}%`,
+            step: (v) => Math.max(97.6, Math.min(98.8, v + (98.2 - v) * 0.25 + (Math.random() * 2 - 1) * 0.3)),
+        });
+        // Temp: whole degrees from 70 to 74, about once a minute moving one degree or staying put. It leans back
+        // towards 72, so it shows 72 most of the time and 70 or 74 only now and then.
+        driftReadout(triggerfishToggle, {
+            every: 60000, start: 72, format: (v) => `${v}°F`,
+            step: (v) => {
+                const r = Math.random();
+                if (v === 72) return r < 0.3 ? 71 : r < 0.6 ? 73 : 72;
+                const back = v < 72 ? 1 : -1;
+                const edge = v === 70 || v === 74;
+                if (r < (edge ? 0.6 : 0.5)) return v + back;              // a degree back towards 72
+                if (!edge && r < 0.7) return v - back;                     // a degree further out
+                return v;                                                  // stays put
+            },
+        });
 
         if (!reduceMotion) requestAnimationFrame(tick);
     </script>
